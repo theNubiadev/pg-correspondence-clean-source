@@ -1,0 +1,422 @@
+// Postgraduate Correspondence Register — MYSQL (Vercel/Neon; LAN can use Postgres too)
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "mysql"
+  url      = env("DATABASE_URL")
+}
+
+enum UserRole {
+  SUPER_ADMIN
+  PROVOST_STAFF
+  DEPARTMENT_STAFF
+}
+
+enum UserStatus {
+  ACTIVE
+  INACTIVE
+}
+
+enum OfficeStatus {
+  ACTIVE
+  INACTIVE
+}
+
+enum CorrespondenceStatus {
+  RECEIVED
+  AWAITING_PROVOST_ACTION
+  TREATED
+  DISPATCHED
+  CLOSED
+  /// Parked for later review — not actively treated, but still open.
+  KIV
+}
+
+enum ApplicantType {
+  STUDENT
+  STAFF
+  UNIT
+  EXTERNAL
+  OTHERS
+}
+
+enum NotificationType {
+  DIRECTED
+  UNATTENDED_REMINDER
+  CLOSED
+  HANDOFF_AWAITING
+  PHYSICAL_RECEIVED
+  PHYSICAL_NOT_RECEIVED
+  PHYSICAL_RESENT
+  VIRTUAL_RECORD_MISSING
+  DISCREPANCY_RESOLVED
+  HANDOFF_OVERDUE
+}
+
+enum CorrespondenceEventType {
+  CREATED
+  UPDATED
+  ADVANCED
+  DISPATCHED
+  FORWARDED
+  CLOSED
+  PARKED_KIV
+  RESUMED_KIV
+  CORRECTED
+  IMPORTED
+  HANDOFF_CREATED
+  PHYSICAL_RECEIVED
+  PHYSICAL_NOT_RECEIVED
+  PHYSICAL_RESENT
+  VIRTUAL_RECORD_MISSING
+  DISCREPANCY_RESOLVED
+}
+
+enum PhysicalReceiptState {
+  PENDING
+  RECEIVED
+  NOT_RECEIVED
+}
+
+enum OrphanIntakeStatus {
+  OPEN
+  LINKED
+  RESOLVED
+}
+
+model User {
+  id                   String     @id @default(cuid())
+  fullName             String     @map("full_name")
+  username             String     @unique
+  email                String     @unique
+  passwordHash         String     @map("password_hash")
+  /// University authentic.user_type code (e.g. rec, fin, prov).
+  userType             String?    @map("user_type")
+  role                 UserRole   @default(PROVOST_STAFF)
+  status               UserStatus @default(ACTIVE)
+  mustChangePassword   Boolean    @default(false) @map("must_change_password")
+  destinationOfficeId  String?    @map("destination_office_id")
+  lastLoginAt          DateTime?  @map("last_login_at")
+  failedLoginCount     Int        @default(0) @map("failed_login_count")
+  lockedUntil          DateTime?  @map("locked_until")
+  createdAt            DateTime   @default(now()) @map("created_at")
+  updatedAt            DateTime   @updatedAt @map("updated_at")
+
+  destinationOffice     DestinationOffice? @relation(fields: [destinationOfficeId], references: [id])
+  authentic             Authentic?
+  sessions              Session[]
+  passwordResets        PasswordResetToken[]
+  createdCorrespondence Correspondence[]   @relation("CorrespondenceCreatedBy")
+  correspondenceEvents  CorrespondenceEvent[]
+  auditLogs             AuditLog[]
+  notifications         Notification[]
+  sentHandoffs          CorrespondenceHandoff[] @relation("HandoffSentBy")
+  acknowledgedHandoffs  CorrespondenceHandoff[] @relation("HandoffAcknowledgedBy")
+  resentHandoffs        CorrespondenceHandoff[] @relation("HandoffResentBy")
+  orphanReports         PhysicalOrphanReport[] @relation("OrphanReportedBy")
+  resolvedOrphans       PhysicalOrphanReport[] @relation("OrphanResolvedBy")
+  uploadedAttachments   CorrespondenceAttachment[] @relation("AttachmentUploadedBy")
+  prelaunchEvents       PrelaunchEvent[] @relation("PrelaunchRecordedBy")
+
+  @@index([role])
+  @@index([status])
+  @@index([userType])
+  @@index([destinationOfficeId])
+  @@map("users")
+}
+
+/// University-sent auth table (username / pass / user_type). Credentials live here.
+model Authentic {
+  id       Int     @id @default(autoincrement())
+  username String  @unique @db.VarChar(100)
+  /// bcrypt hash of the university `pass` value (never plaintext).
+  pass     String  @db.VarChar(255)
+  userType String  @map("user_type") @db.VarChar(50)
+  userId   String? @unique @map("user_id")
+  user     User?   @relation(fields: [userId], references: [id], onDelete: SetNull)
+
+  @@index([userType])
+  @@map("authentic")
+}
+
+model Session {
+  id         String    @id @default(cuid())
+  userId     String    @map("user_id")
+  tokenHash  String    @unique @map("token_hash")
+  ipAddress  String?   @map("ip_address")
+  userAgent  String?   @map("user_agent")
+  expiresAt  DateTime  @map("expires_at")
+  revokedAt  DateTime? @map("revoked_at")
+  lastSeenAt DateTime  @default(now()) @map("last_seen_at")
+  createdAt  DateTime  @default(now()) @map("created_at")
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@index([expiresAt])
+  @@map("sessions")
+}
+
+model PasswordResetToken {
+  id        String    @id @default(cuid())
+  userId    String    @map("user_id")
+  tokenHash String    @unique @map("token_hash")
+  expiresAt DateTime  @map("expires_at")
+  usedAt    DateTime? @map("used_at")
+  ipAddress String?   @map("ip_address")
+  createdAt DateTime  @default(now()) @map("created_at")
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@map("password_reset_tokens")
+}
+
+model DestinationOffice {
+  id         String       @id @default(cuid())
+  officeName String       @unique @map("office_name")
+  status     OfficeStatus @default(ACTIVE)
+  createdAt  DateTime     @default(now()) @map("created_at")
+  updatedAt  DateTime     @updatedAt @map("updated_at")
+
+  correspondence   Correspondence[]
+  users            User[]
+  incomingHandoffs CorrespondenceHandoff[] @relation("HandoffToOffice")
+  outgoingHandoffs CorrespondenceHandoff[] @relation("HandoffFromOffice")
+  orphanReports    PhysicalOrphanReport[] @relation("OrphanReportingOffice")
+  orphanSending    PhysicalOrphanReport[] @relation("OrphanSendingOffice")
+
+  @@index([status])
+  @@map("destination_offices")
+}
+
+model ReferenceCounter {
+  year      Int      @id
+  lastValue Int      @default(0) @map("last_value")
+  prefix    String   @default("PROV")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  @@map("reference_counters")
+}
+
+model Correspondence {
+  id                  String               @id @default(cuid())
+  referenceNumber     String               @unique @map("reference_number")
+  sequence            Int
+  year                Int
+  /// Mail type / correspondent category (UI label; column kept for compatibility).
+  applicantType       ApplicantType        @default(STUDENT) @map("applicant_type")
+  /// Letter writer / originator (UI label; column kept for compatibility).
+  studentName         String               @map("student_name")
+  /// Optional person who brought/presented the letter on behalf of the writer.
+  onBehalfOf          String?              @map("on_behalf_of")
+  /// Optional Finance payment voucher / transaction key. Unique when set.
+  pvNumber            String?              @unique @map("pv_number")
+  /// Groups letters logged together (unit / date / subject batch).
+  batchNumber         String?              @map("batch_number")
+  /// Person the letter is written to, when it is not only addressed to a unit.
+  addresseeName       String?              @map("addressee_name")
+  matricNumber        String               @default("") @map("matric_number")
+  faculty             String               @default("")
+  department          String               @default("")
+  staffId             String?              @map("staff_id")
+  phoneNumber         String               @map("phone_number")
+  subject             String               @db.Text
+  remarks             String?              @db.Text
+  dateReceived        DateTime             @map("date_received")
+  dateSentToOffice    DateTime?            @map("date_sent_to_office")
+  dateClosed          DateTime?            @map("date_closed")
+  destinationOfficeId String?              @map("destination_office_id")
+  status              CorrespondenceStatus @default(AWAITING_PROVOST_ACTION)
+  /// Status before parking as KIV — restored when the letter is resumed.
+  statusBeforeKiv     CorrespondenceStatus? @map("status_before_kiv")
+  createdById         String               @map("created_by_id")
+  createdAt           DateTime             @default(now()) @map("created_at")
+  updatedAt           DateTime             @updatedAt @map("updated_at")
+
+  destinationOffice DestinationOffice? @relation(fields: [destinationOfficeId], references: [id])
+  createdBy         User               @relation("CorrespondenceCreatedBy", fields: [createdById], references: [id])
+  notifications     Notification[]
+  events            CorrespondenceEvent[]
+  handoffs          CorrespondenceHandoff[]
+  orphanReports     PhysicalOrphanReport[]
+  attachments       CorrespondenceAttachment[]
+
+  @@index([status])
+  @@index([dateReceived])
+  @@index([destinationOfficeId])
+  @@index([createdById])
+  @@index([referenceNumber])
+  @@index([matricNumber])
+  @@index([studentName])
+  @@index([applicantType])
+  @@index([batchNumber])
+  @@index([year, sequence])
+  @@map("correspondence")
+}
+
+/// A recorded pre-launch briefing before the register goes live.
+model PrelaunchEvent {
+  id           String   @id @default(cuid())
+  title        String
+  heldAt       DateTime @map("held_at")
+  venue        String?
+  notes        String?  @db.Text
+  recordedById String   @map("recorded_by_id")
+  createdAt    DateTime @default(now()) @map("created_at")
+
+  recordedBy User @relation("PrelaunchRecordedBy", fields: [recordedById], references: [id])
+
+  @@index([heldAt])
+  @@map("prelaunch_events")
+}
+
+/// Optional letter scan / photo / PDF attached at log or dispatch.
+model CorrespondenceAttachment {
+  id               String   @id @default(cuid())
+  correspondenceId String   @map("correspondence_id")
+  fileName         String   @map("file_name")
+  storedName       String   @map("stored_name")
+  mimeType         String   @map("mime_type")
+  sizeBytes        Int      @map("size_bytes")
+  uploadedById     String   @map("uploaded_by_id")
+  createdAt        DateTime @default(now()) @map("created_at")
+
+  correspondence Correspondence @relation(fields: [correspondenceId], references: [id], onDelete: Cascade)
+  uploadedBy     User           @relation("AttachmentUploadedBy", fields: [uploadedById], references: [id])
+
+  @@index([correspondenceId])
+  @@index([uploadedById])
+  @@map("correspondence_attachments")
+}
+
+model Notification {
+  id               String           @id @default(cuid())
+  userId           String           @map("user_id")
+  type             NotificationType
+  title            String
+  body             String           @db.Text
+  correspondenceId String?          @map("correspondence_id")
+  readAt           DateTime?        @map("read_at")
+  createdAt        DateTime         @default(now()) @map("created_at")
+
+  user           User            @relation(fields: [userId], references: [id], onDelete: Cascade)
+  correspondence Correspondence? @relation(fields: [correspondenceId], references: [id], onDelete: Cascade)
+
+  @@index([userId, readAt])
+  @@index([userId, createdAt])
+  @@index([correspondenceId, type, userId])
+  @@map("notifications")
+}
+
+model CorrespondenceEvent {
+  id               String                   @id @default(cuid())
+  correspondenceId String                   @map("correspondence_id")
+  actorId          String?                  @map("actor_id")
+  type             CorrespondenceEventType
+  fromStatus       CorrespondenceStatus?    @map("from_status")
+  toStatus         CorrespondenceStatus?    @map("to_status")
+  fromOfficeId     String?                  @map("from_office_id")
+  toOfficeId       String?                  @map("to_office_id")
+  note             String?                  @db.Text
+  metadata         String?                  @db.Text
+  createdAt        DateTime                 @default(now()) @map("created_at")
+
+  correspondence Correspondence @relation(fields: [correspondenceId], references: [id], onDelete: Cascade)
+  actor          User?          @relation(fields: [actorId], references: [id], onDelete: SetNull)
+  handoff        CorrespondenceHandoff?
+
+  @@index([correspondenceId, createdAt])
+  @@index([actorId])
+  @@index([type])
+  @@map("correspondence_events")
+}
+
+model CorrespondenceHandoff {
+  id                   String               @id @default(cuid())
+  correspondenceId     String               @map("correspondence_id")
+  correspondenceEventId String?             @unique @map("correspondence_event_id")
+  fromOfficeId         String?              @map("from_office_id")
+  toOfficeId           String               @map("to_office_id")
+  sentById             String               @map("sent_by_id")
+  virtualSentAt        DateTime             @map("virtual_sent_at")
+  state                PhysicalReceiptState @default(PENDING)
+  current              Boolean              @default(true)
+  acknowledgedAt       DateTime?            @map("acknowledged_at")
+  acknowledgedById     String?              @map("acknowledged_by_id")
+  resentAt             DateTime?            @map("resent_at")
+  resentById           String?              @map("resent_by_id")
+  releasedAt           DateTime?            @map("released_at")
+  note                 String?              @db.Text
+  createdAt            DateTime             @default(now()) @map("created_at")
+  updatedAt            DateTime             @updatedAt @map("updated_at")
+
+  correspondence Correspondence     @relation(fields: [correspondenceId], references: [id], onDelete: Cascade)
+  event          CorrespondenceEvent? @relation(fields: [correspondenceEventId], references: [id], onDelete: SetNull)
+  fromOffice     DestinationOffice? @relation("HandoffFromOffice", fields: [fromOfficeId], references: [id])
+  toOffice       DestinationOffice  @relation("HandoffToOffice", fields: [toOfficeId], references: [id])
+  sentBy         User               @relation("HandoffSentBy", fields: [sentById], references: [id])
+  acknowledgedBy User?              @relation("HandoffAcknowledgedBy", fields: [acknowledgedById], references: [id])
+  resentBy       User?              @relation("HandoffResentBy", fields: [resentById], references: [id])
+
+  @@index([correspondenceId, current])
+  @@index([toOfficeId, state, current])
+  @@index([fromOfficeId])
+  @@map("correspondence_handoffs")
+}
+
+model PhysicalOrphanReport {
+  id                     String             @id @default(cuid())
+  reportingOfficeId      String             @map("reporting_office_id")
+  reportedById           String             @map("reported_by_id")
+  sendingOfficeId        String?            @map("sending_office_id")
+  referenceHint          String?            @map("reference_hint")
+  applicantNameHint      String?            @map("applicant_name_hint")
+  subjectHint            String?            @map("subject_hint")
+  datePhysicalReceived   DateTime           @map("date_physical_received")
+  note                   String             @db.Text
+  status                 OrphanIntakeStatus @default(OPEN)
+  linkedCorrespondenceId String?            @map("linked_correspondence_id")
+  linkedAt               DateTime?          @map("linked_at")
+  linkedById             String?            @map("linked_by_id")
+  createdAt              DateTime           @default(now()) @map("created_at")
+  updatedAt              DateTime           @updatedAt @map("updated_at")
+
+  reportingOffice DestinationOffice @relation("OrphanReportingOffice", fields: [reportingOfficeId], references: [id])
+  sendingOffice   DestinationOffice? @relation("OrphanSendingOffice", fields: [sendingOfficeId], references: [id])
+  reportedBy      User              @relation("OrphanReportedBy", fields: [reportedById], references: [id])
+  linkedBy        User?             @relation("OrphanResolvedBy", fields: [linkedById], references: [id])
+  correspondence  Correspondence?   @relation(fields: [linkedCorrespondenceId], references: [id], onDelete: SetNull)
+
+  @@index([status])
+  @@index([reportingOfficeId])
+  @@index([sendingOfficeId])
+  @@map("physical_orphan_reports")
+}
+
+model AuditLog {
+  id        String   @id @default(cuid())
+  userId    String?  @map("user_id")
+  action    String
+  module    String
+  details   String?  @db.Text
+  createdAt DateTime @default(now()) @map("created_at")
+
+  user User? @relation(fields: [userId], references: [id])
+
+  @@index([createdAt])
+  @@index([userId])
+  @@index([action])
+  @@index([module])
+  @@map("audit_logs")
+}
+
+model Setting {
+  key   String @id
+  value String @db.Text
+
+  @@map("settings")
+}
